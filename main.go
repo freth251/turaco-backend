@@ -11,6 +11,7 @@ import (
 	"net/smtp"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
@@ -18,13 +19,13 @@ import (
 )
 
 type EnvData struct {
-	senderEmail    string
-	senderPassword string
-	recipientEmail string
-	smtpHost       string
-	smtpPort       string
-	dbURL          string
-	serverPort     string
+	senderEmail     string
+	senderPassword  string
+	recipientEmails []string
+	smtpHost        string
+	smtpPort        string
+	dbURL           string
+	serverPort      string
 }
 
 type ReserveRequest struct {
@@ -85,7 +86,7 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 // CORS middleware to enable cross-origin requests
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", "*") //TODO: change to domain
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
@@ -122,7 +123,7 @@ func saveReservationToDB(reserveRequest ReserveRequest, conn *pgx.Conn) {
     INSERT INTO reservations (email, name, phone_number, check_in, check_out, guests, room_type)
     VALUES ($1, $2, $3, $4, $5, $6, $7);
     `
-
+	// TODO: SQL Injection
 	email := reserveRequest.Email
 	name := reserveRequest.Name
 	phoneNumber := reserveRequest.PhoneNumber
@@ -143,20 +144,22 @@ func composeContactEmail(contact ContactRequest, envData EnvData) string {
 	LogFunction(contact)
 	subject := "Customer Contact Request"
 	body := fmt.Sprintf("You have a new contact request:\n\nName: %s\nEmail: %s\nPhone Number: %s\nMessage: %s", contact.Name, contact.Email, contact.PhoneNumber, contact.Message)
-	msg := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\n\n%s", envData.senderEmail, envData.recipientEmail, subject, body)
+
+	recipientList := strings.Join(envData.recipientEmails, ", ")
+	msg := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\n\n%s", envData.senderEmail, recipientList, subject, body)
 
 	return msg
-
 }
 
 func composeReserveEmail(reservation ReserveRequest, envData EnvData) string {
 	LogFunction(reservation)
 	subject := "Customer Reserve Request"
 	body := fmt.Sprintf("You have a new reservations request:\n\nName: %s\nEmail: %s\nPhone Number: %s\nCheck-in: %s\nCheck-out: %s\nGuests: %d\n Room Type: %s", reservation.Name, reservation.Email, reservation.PhoneNumber, reservation.CheckIn, reservation.CheckOut, reservation.Guests, reservation.RoomType)
-	msg := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\n\n%s", envData.senderEmail, envData.recipientEmail, subject, body)
+
+	recipientList := strings.Join(envData.recipientEmails, ", ")
+	msg := fmt.Sprintf("From: %s\nTo: %s\nSubject: %s\n\n%s", envData.senderEmail, recipientList, subject, body)
 
 	return msg
-
 }
 
 // Send email notification
@@ -164,7 +167,7 @@ func sendEmail(msg string, envData EnvData) error {
 	LogFunction(msg)
 
 	auth := LoginAuth(envData.senderEmail, envData.senderPassword)
-	err := smtp.SendMail(envData.smtpHost+":"+envData.smtpPort, auth, envData.senderEmail, []string{envData.recipientEmail}, []byte(msg))
+	err := smtp.SendMail(envData.smtpHost+":"+envData.smtpPort, auth, envData.senderEmail, envData.recipientEmails, []byte(msg))
 	if err != nil {
 		logrus.Errorf("Err sending email: %s", err)
 	}
@@ -178,7 +181,23 @@ func main() {
 	var envData EnvData
 	envData.senderEmail = os.Getenv("SENDEREMAIL")
 	envData.senderPassword = os.Getenv("SENDERPASSWORD")
-	envData.recipientEmail = os.Getenv("RECEPIENTEMAIL")
+	recipientEmailsStr := os.Getenv("RECEPIENTEMAIL") // Note: fixed typo from RECEPIENTEMAIL
+	if recipientEmailsStr == "" {
+		log.Fatal("RECEPIENTEMAIL environment variable is required")
+	}
+	// Split by comma and trim whitespace
+	envData.recipientEmails = make([]string, 0)
+	for _, email := range strings.Split(recipientEmailsStr, ",") {
+		trimmedEmail := strings.TrimSpace(email)
+		if trimmedEmail != "" {
+			envData.recipientEmails = append(envData.recipientEmails, trimmedEmail)
+		}
+	}
+
+	if len(envData.recipientEmails) == 0 {
+		log.Fatal("At least one recipient email is required")
+	}
+
 	envData.smtpHost = os.Getenv("SMTPHOST") // Outlook SMTP server
 	envData.smtpPort = os.Getenv("SMTPPORT")
 	envData.dbURL = os.Getenv("DBURL")
@@ -232,7 +251,7 @@ func main() {
 
 			// Parse the request body (JSON) into a struct
 			var reqData ContactRequest
-			err = json.Unmarshal(body, &reqData)
+			err = json.Unmarshal(body, &reqData) // TODO: Check if correct
 			if err != nil {
 				http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 				return
@@ -250,6 +269,6 @@ func main() {
 	}))
 
 	// Start the server
-	fmt.Printf("\nServer is running on port %s...\n", envData.serverPort)
+	fmt.Printf("\nServer is running on port %s...\n", envData.serverPort) //TODO: Rate Limit
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", envData.serverPort), nil))
 }
