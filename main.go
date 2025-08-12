@@ -184,7 +184,7 @@ func checkContactRequestTest(conn *pgx.Conn) []string {
 	var contactTime time.Time
 
 	err := conn.QueryRow(context.Background(), `
-		SELECT name, phone_number, message, created_at 
+		SELECT created_at 
 		FROM contacts 
 		WHERE email = $1 
 		ORDER BY created_at DESC 
@@ -215,7 +215,7 @@ func checkReservationRequestTest(roomType string, conn *pgx.Conn) []string {
 	var contactTime time.Time
 
 	err := conn.QueryRow(context.Background(), `
-		SELECT name, phone_number, message, created_at 
+		SELECT created_at 
 		FROM reservations 
 		WHERE email = $1 AND room_type = $2
 		ORDER BY created_at DESC 
