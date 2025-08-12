@@ -11,8 +11,11 @@ import (
 	"net/smtp"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
@@ -26,6 +29,8 @@ type EnvData struct {
 	smtpPort        string
 	dbURL           string
 	serverPort      string
+	telegramBotApi  string
+	chatIds         []int64
 }
 
 type ReserveRequest struct {
@@ -173,7 +178,103 @@ func sendEmail(msg string, envData EnvData) error {
 	}
 	return err
 }
+func checkContactRequestTest(conn *pgx.Conn) []string {
+	var alerts []string
+	email := "test@test.com"
+	var contactTime time.Time
+
+	err := conn.QueryRow(context.Background(), `
+		SELECT name, phone_number, message, created_at 
+		FROM contacts 
+		WHERE email = $1 
+		ORDER BY created_at DESC 
+		LIMIT 1
+	`, email).Scan(&contactTime)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return alerts
+		}
+		logrus.Errorf("Error querying contacts: %v", err)
+		return alerts
+	}
+
+	timeDiff := time.Since(contactTime)
+	if timeDiff > time.Hour {
+		alertMsg := fmt.Sprintf("🚨 **Contact Alert**: Latest test contact is more than 1 hour old\n"+
+			"Contact Time: %s\n⏰ Age: %.1f hours", contactTime.Format("2006-01-02 15:04"), timeDiff.Hours())
+		alerts = append(alerts, alertMsg)
+	}
+
+	return alerts
+}
+
+func checkReservationRequestTest(roomType string, conn *pgx.Conn) []string {
+	var alerts []string
+	email := "test@test.com"
+	var contactTime time.Time
+
+	err := conn.QueryRow(context.Background(), `
+		SELECT name, phone_number, message, created_at 
+		FROM reservations 
+		WHERE email = $1 AND room_type = $2
+		ORDER BY created_at DESC 
+		LIMIT 1
+	`, email, roomType).Scan(&contactTime)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return alerts
+		}
+		logrus.Errorf("Error querying %s reservations: %v", roomType, err)
+		return alerts
+	}
+
+	timeDiff := time.Since(contactTime)
+	if timeDiff > time.Hour {
+		alertMsg := fmt.Sprintf("🚨 **%s Reservation Alert**: Latest test reservation is more than 1 hour old\n"+
+			"Contact Time: %s\n⏰ Age: %.1f hours", roomType, contactTime.Format("2006-01-02 15:04"), timeDiff.Hours())
+		alerts = append(alerts, alertMsg)
+	}
+
+	return alerts
+}
+
+func sendMessage(bot *tgbotapi.BotAPI, envData EnvData, finalMessage string) {
+	for _, chatID := range envData.chatIds {
+		msg := tgbotapi.NewMessage(chatID, finalMessage)
+		_, err := bot.Send(msg)
+		if err != nil {
+			log.Printf("Failed to send message: %v", err)
+		}
+	}
+}
+func startMonitoringBot(ctx context.Context, conn *pgx.Conn, bot *tgbotapi.BotAPI, envData EnvData) {
+	ticker := time.NewTicker(1 * time.Hour)
+
+	for {
+		select {
+		case <-ticker.C:
+			var allMessages []string
+			allMessages = append(allMessages, checkContactRequestTest(conn)...)
+			allMessages = append(allMessages, checkReservationRequestTest("Standard Suite", conn)...)
+			allMessages = append(allMessages, checkReservationRequestTest("Deluxe Suite", conn)...)
+			allMessages = append(allMessages, checkReservationRequestTest("Double Bed", conn)...)
+
+			if len(allMessages) > 0 {
+				finalMessage := strings.Join(allMessages, "\n")
+				sendMessage(bot, envData, finalMessage)
+
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+
+}
+
 func main() {
+	ctx := context.Background()
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
@@ -181,7 +282,7 @@ func main() {
 	var envData EnvData
 	envData.senderEmail = os.Getenv("SENDEREMAIL")
 	envData.senderPassword = os.Getenv("SENDERPASSWORD")
-	recipientEmailsStr := os.Getenv("RECEPIENTEMAIL") // Note: fixed typo from RECEPIENTEMAIL
+	recipientEmailsStr := os.Getenv("RECEPIENTEMAIL")
 	if recipientEmailsStr == "" {
 		log.Fatal("RECEPIENTEMAIL environment variable is required")
 	}
@@ -203,12 +304,34 @@ func main() {
 	envData.dbURL = os.Getenv("DBURL")
 	envData.serverPort = os.Getenv("SEREVRPORT")
 	// Connect to the PostgreSQL database
-	conn, err := pgx.Connect(context.Background(), envData.dbURL)
+	conn, err := pgx.Connect(ctx, envData.dbURL)
 	if err != nil {
 		log.Fatal("Unable to connect to database:", err)
 	}
-	defer conn.Close(context.Background())
+	defer conn.Close(ctx)
 
+	envData.telegramBotApi = os.Getenv("TELEGRAMBOTAPI")
+	chatIdsStr := os.Getenv("CHATIDLIST")
+	bot, err := tgbotapi.NewBotAPI(envData.telegramBotApi)
+
+	envData.chatIds = make([]int64, 0)
+	for _, idStr := range strings.Split(chatIdsStr, ",") {
+		idStr = strings.TrimSpace(idStr)
+		if idStr != "" {
+
+			chatID, err := strconv.ParseInt(idStr, 10, 64)
+			if err != nil {
+				log.Printf("Invalid chat ID: %s", idStr)
+				continue
+			}
+			envData.chatIds = append(envData.chatIds, chatID)
+		}
+	}
+
+	if err != nil {
+		log.Fatal("Unable to create bot:", err)
+	}
+	go startMonitoringBot(ctx, conn, bot, envData)
 	http.HandleFunc("/api/reserve", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -228,9 +351,11 @@ func main() {
 				return
 			}
 			saveReservationToDB(reqData, conn)
-			msg := composeReserveEmail(reqData, envData)
+			if reqData.Email != "test@test.com" {
+				msg := composeReserveEmail(reqData, envData)
 
-			sendEmail(msg, envData)
+				sendEmail(msg, envData)
+			}
 
 			// Respond with a message containing the received data
 			response := Response{Message: "Received request"}
@@ -258,9 +383,11 @@ func main() {
 			}
 
 			saveContactToDB(reqData, conn)
-			msg := composeContactEmail(reqData, envData)
+			if reqData.Email != "test@test.com" {
+				msg := composeContactEmail(reqData, envData)
 
-			sendEmail(msg, envData)
+				sendEmail(msg, envData)
+			}
 
 			// Respond with a message containing the received data
 			response := Response{Message: "Received Request"}
