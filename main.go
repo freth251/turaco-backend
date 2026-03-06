@@ -33,7 +33,7 @@ type EnvData struct {
 	serverPort      string
 	telegramBotApi  string
 	chatIds         []int64
-	corsOrigin      string
+	corsOrigins     []string
 }
 
 type ReserveRequest struct {
@@ -139,9 +139,15 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	return nil, nil
 }
 
-func enableCORS(next http.HandlerFunc, origin string) http.HandlerFunc {
+func enableCORS(next http.HandlerFunc, allowedOrigins []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
+		origin := r.Header.Get("Origin")
+		for _, allowed := range allowedOrigins {
+			if origin == allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				break
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
@@ -372,9 +378,15 @@ func main() {
 	envData.smtpPort = os.Getenv("SMTPPORT")
 	envData.dbURL = os.Getenv("DBURL")
 	envData.serverPort = os.Getenv("SERVERPORT")
-	envData.corsOrigin = os.Getenv("CORSORIGIN")
-	if envData.corsOrigin == "" {
+	corsOriginStr := os.Getenv("CORSORIGIN")
+	if corsOriginStr == "" {
 		log.Fatal("CORSORIGIN environment variable is required")
+	}
+	for _, o := range strings.Split(corsOriginStr, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			envData.corsOrigins = append(envData.corsOrigins, o)
+		}
 	}
 
 	pool, err := pgxpool.New(ctx, envData.dbURL)
@@ -443,7 +455,7 @@ func main() {
 		}
 
 		json.NewEncoder(w).Encode(Response{Message: "Received request"})
-	}, rl), envData.corsOrigin))
+	}, rl), envData.corsOrigins))
 
 	http.HandleFunc("/api/contact", enableCORS(rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -481,7 +493,7 @@ func main() {
 		}
 
 		json.NewEncoder(w).Encode(Response{Message: "Received Request"})
-	}, rl), envData.corsOrigin))
+	}, rl), envData.corsOrigins))
 
 	fmt.Printf("\nServer is running on port %s...\n", envData.serverPort)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", envData.serverPort), nil))
