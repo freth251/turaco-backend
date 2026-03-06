@@ -73,8 +73,9 @@ else
     fi
 fi
 
-echo "==> Creating postgres role (if not exists)..."
+echo "==> Ensuring postgres role has password set..."
 run_psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='postgres'" | grep -q 1 \
+    && run_psql postgres -c "ALTER USER postgres PASSWORD 'password';" \
     || run_psql postgres -c "CREATE USER postgres WITH SUPERUSER PASSWORD 'password';"
 
 echo "==> Creating database turacodb (if not exists)..."
@@ -102,6 +103,15 @@ CREATE TABLE IF NOT EXISTS reservations (
     check_out    TIMESTAMP NOT NULL,
     room_type    TEXT,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS page_views (
+    id         SERIAL PRIMARY KEY,
+    ip         VARCHAR(45),
+    user_agent TEXT,
+    page       VARCHAR(500),
+    referrer   VARCHAR(500),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 SQL
 
